@@ -641,28 +641,46 @@ def _get_course_grades_detail(courseid: int) -> list[GradeItem]:
 
 
 def search_course_materials(query: str) -> list[SearchResult]:
-    data = get_moodle_api_data(
-        APIFunction.core_search_search,
-        params={"query": query},
-    )
+    """Search the user's course materials for a query string.
 
-    to_json_file(data, f"search_{query}.json")
+    Moodle global search (core_search_*) is an optional subsystem that is
+    disabled by default and needs a configured search engine, so it cannot be
+    relied on. Instead we search client-side over the contents of the enrolled
+    courses, matching section names, activity names and file names. This works
+    on any Moodle instance.
+    """
+    needle = query.lower().strip()
+    results: list[SearchResult] = []
 
-    results_raw = data.get("results", [])
+    for course in get_my_courses():
+        try:
+            sections = get_course_content(course["id"])
+        except MoodleAPIError as e:
+            logger.warning(f"Skipping course {course['id']} in search: {e}")
+            continue
 
-    result: list[SearchResult] = []
-    for item in results_raw:
-        result.append(
-            {
-                "title": item.get("title", ""),
-                "url": item.get("url", ""),
-                "content": item.get("content", ""),
-                "course_name": item.get("coursefullname", None),
-            }
-        )
+        for section in sections:
+            section_name = section.get("name") or ""
+            for module in section.get("modules", []):
+                name = module.get("name") or ""
+                filenames = [
+                    c.get("filename", "")
+                    for c in (module.get("contents") or [])
+                    if isinstance(c, dict)
+                ]
+                haystack = " ".join([name, section_name, *filenames]).lower()
+                if needle and needle in haystack:
+                    results.append(
+                        {
+                            "title": name,
+                            "url": module.get("url") or "",
+                            "content": section_name,
+                            "course_name": course.get("fullname"),
+                        }
+                    )
 
-    logger.info(f"Search for '{query}' returned {len(result)} results")
-    return result
+    logger.info(f"Search for '{query}' matched {len(results)} materials")
+    return results
 
 
 # ---------------------------------------------------------------------------
