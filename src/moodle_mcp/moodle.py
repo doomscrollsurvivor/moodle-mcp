@@ -50,23 +50,23 @@ DELETE_FIELDS = {
         "events.*.course.courseimage"
     ],
     APIFunction.core_course_get_contents: [
-        "modules.*.modicon",
-        "modules.*.modplural",
-        "modules.*.onclick",
-        "modules.*.afterlink",
-        "modules.*.customdata",
-        "modules.*.contents.*.filepath",
-        "modules.*.contents.*.timecreated",
-        "modules.*.contents.*.timemodified",
-        "modules.*.contents.*.sortorder",
-        "modules.*.contents.*.isexternalfile",
-        "modules.*.contents.*.repositorytype",
-        "modules.*.contents.*.userid",
-        "modules.*.contents.*.author",
-        "modules.*.contents.*.license",
-        "modules.*.contents.*.mimetype",
-        "modules.*.completiondata",
-        "modules.*.contentsinfo",
+        "*.modules.*.modicon",
+        "*.modules.*.modplural",
+        "*.modules.*.onclick",
+        "*.modules.*.afterlink",
+        "*.modules.*.customdata",
+        "*.modules.*.contents.*.filepath",
+        "*.modules.*.contents.*.timecreated",
+        "*.modules.*.contents.*.timemodified",
+        "*.modules.*.contents.*.sortorder",
+        "*.modules.*.contents.*.isexternalfile",
+        "*.modules.*.contents.*.repositorytype",
+        "*.modules.*.contents.*.userid",
+        "*.modules.*.contents.*.author",
+        "*.modules.*.contents.*.license",
+        "*.modules.*.contents.*.mimetype",
+        "*.modules.*.completiondata",
+        "*.modules.*.contentsinfo",
     ],
     APIFunction.mod_assign_get_submission_status: [
         "lastattempt.submission.plugins",
@@ -132,6 +132,6 @@ def get_moodle_api_data(
         return data
 
     for field_path in DELETE_FIELDS.get(function, []):
-        delete(data, field_path)
+        delete(data, field_path, ignore_missing=True)
 
     return data
