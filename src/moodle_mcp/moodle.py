@@ -33,7 +33,6 @@ class APIFunction(Enum):
         "gradereport_overview_get_course_grades"
     )
     gradereport_user_get_grade_items = "gradereport_user_get_grade_items"
-    core_search_search = "core_search_search"
     core_course_get_updates_since = "core_course_get_updates_since"
     mod_forum_get_forums_by_courses = "mod_forum_get_forums_by_courses"
     mod_forum_get_discussions = "mod_forum_get_discussions"
