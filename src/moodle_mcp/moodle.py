@@ -104,8 +104,18 @@ def get_moodle_api_data(
         f" with params: {list(params.keys()) if params else 'none'}"
     )
 
+    # Some Moodle deployments, including Cloudflare-fronted campuses, block
+    # python-requests' default User-Agent. POST also avoids leaking the token in
+    # query strings while remaining compatible with Moodle REST web services.
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        )
+    }
+
     try:
-        rsp = requests.get(MOODLE_URL, params=request_params, timeout=30)
+        rsp = requests.post(MOODLE_URL, data=request_params, headers=headers, timeout=30)
     except requests.RequestException as e:
         logger.error(f"Network error calling {function.value}: {e}")
         raise MoodleAPIError("network_error", str(e), function.value) from e

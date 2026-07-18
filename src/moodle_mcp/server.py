@@ -115,6 +115,24 @@ def weekly_review() -> api.WeeklyReview:
 
 
 @mcp.tool()
+def detect_new_assignments(update_state: bool = True) -> api.AssignmentDiffReport:
+    """Detect new assignments, removed assignments, and deadline changes since the previous snapshot."""
+    return api.detect_new_assignments(update_state=update_state)
+
+
+@mcp.tool()
+def detect_grade_changes(update_state: bool = True) -> api.GradeDiffReport:
+    """Detect newly visible, changed, and removed course grades since the previous snapshot."""
+    return api.detect_grade_changes(update_state=update_state)
+
+
+@mcp.tool()
+def deadline_watchdog(days_ahead: int = 3) -> api.DeadlineWatchdogReport:
+    """Return unsubmitted assignment deadlines within the next N days for alerting."""
+    return api.deadline_watchdog(days_ahead=days_ahead)
+
+
+@mcp.tool()
 def ask_moodle(question: str) -> api.MoodleAnswer:
     """Ask a natural language question about your Moodle data. Routes to the right data sources based on your question"""
     return api.ask_moodle(question)

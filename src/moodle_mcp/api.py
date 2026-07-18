@@ -1,4 +1,7 @@
+import json
+import os
 import re
+from pathlib import Path
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing_extensions import TypedDict
@@ -320,6 +323,60 @@ class ImplementationPlan(TypedDict):
     steps: list[PlanStep]
     milestones: list[str]  # key checkpoints
     risk_factors: list[str]
+
+
+class DeadlineAlert(TypedDict):
+    assignment_id: int
+    assignment_name: str
+    course_name: str
+    duedate: int
+    duedate_formatted: str
+    submitted: bool
+    submission_status: str | None
+    seconds_remaining: int
+    days_remaining: float
+    urgency: str
+
+
+class DeadlineWatchdogReport(TypedDict):
+    generated_at: str
+    days_ahead: int
+    count: int
+    alerts: list[DeadlineAlert]
+
+
+class AssignmentDeadlineChange(TypedDict):
+    id: int
+    name: str
+    courseid: int
+    coursename: str
+    old_duedate: int
+    new_duedate: int
+    old_duedate_formatted: str | None
+    new_duedate_formatted: str | None
+
+
+class AssignmentDiffReport(TypedDict):
+    generated_at: str
+    state_path: str
+    new_assignments: list[Assignment]
+    changed_deadlines: list[AssignmentDeadlineChange]
+    removed_assignments: list[Assignment]
+
+
+class GradeChange(TypedDict):
+    courseid: int
+    course_name: str
+    old_grade: str | None
+    new_grade: str | None
+
+
+class GradeDiffReport(TypedDict):
+    generated_at: str
+    state_path: str
+    new_grades: list[CourseGrade]
+    changed_grades: list[GradeChange]
+    removed_grades: list[CourseGrade]
 
 
 # ---------------------------------------------------------------------------
@@ -1405,6 +1462,247 @@ def weekly_review() -> WeeklyReview:
         "upcoming_deadlines": upcoming_deadlines,
         "overdue_count": overdue_count,
         "progress_summary": progress_summary,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 tracking / alert tools
+# ---------------------------------------------------------------------------
+
+def _default_state_dir() -> Path:
+    """Return the directory used for local snapshots for diff/watchdog tools."""
+    path = Path(os.getenv("MOODLE_MCP_STATE_DIR", ".moodle_mcp_state"))
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _read_json_state(path: str | Path) -> dict:
+    state_file = Path(path)
+    if not state_file.exists():
+        return {}
+    try:
+        return json.loads(state_file.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        logger.warning(f"Ignoring invalid Moodle MCP state file {state_file}: {e}")
+        return {}
+
+
+def _write_json_state(path: str | Path, data: dict) -> None:
+    state_file = Path(path)
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp = state_file.with_suffix(state_file.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(state_file)
+
+
+def _format_timestamp(ts: int | None) -> str | None:
+    if not ts:
+        return None
+    return datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
+
+
+def _assignment_snapshot(assignments: list[Assignment]) -> dict[str, dict]:
+    return {
+        str(a["id"]): {
+            "id": a["id"],
+            "name": a["name"],
+            "duedate": a["duedate"],
+            "cutoffdate": a.get("cutoffdate", 0),
+            "courseid": a["courseid"],
+            "coursename": a["coursename"],
+            "intro": a.get("intro"),
+        }
+        for a in assignments
+    }
+
+
+def detect_new_assignments(
+    state_path: str | None = None, update_state: bool = True
+) -> AssignmentDiffReport:
+    """Detect newly-created assignments, removed assignments, and deadline changes.
+
+    The first run creates a baseline snapshot and returns all current assignments as
+    new. Pass ``update_state=False`` for dry-runs/tests.
+    """
+    state_file = Path(state_path) if state_path else _default_state_dir() / "assignments.json"
+    current_assignments = get_assignments()
+    current = _assignment_snapshot(current_assignments)
+    previous = _read_json_state(state_file).get("assignments", {})
+
+    new_assignments: list[Assignment] = []
+    changed_deadlines: list[AssignmentDeadlineChange] = []
+    removed_assignments: list[Assignment] = []
+
+    for assignment in current_assignments:
+        key = str(assignment["id"])
+        old = previous.get(key)
+        if old is None:
+            new_assignments.append(assignment)
+            continue
+        old_due = int(old.get("duedate", 0) or 0)
+        new_due = int(assignment.get("duedate", 0) or 0)
+        if old_due != new_due:
+            changed_deadlines.append(
+                {
+                    "id": assignment["id"],
+                    "name": assignment["name"],
+                    "courseid": assignment["courseid"],
+                    "coursename": assignment["coursename"],
+                    "old_duedate": old_due,
+                    "new_duedate": new_due,
+                    "old_duedate_formatted": _format_timestamp(old_due),
+                    "new_duedate_formatted": _format_timestamp(new_due),
+                }
+            )
+
+    for key, old in previous.items():
+        if key not in current:
+            removed_assignments.append(
+                {
+                    "id": int(old.get("id", 0)),
+                    "name": old.get("name", ""),
+                    "duedate": int(old.get("duedate", 0) or 0),
+                    "cutoffdate": int(old.get("cutoffdate", 0) or 0),
+                    "intro": old.get("intro"),
+                    "courseid": int(old.get("courseid", 0) or 0),
+                    "coursename": old.get("coursename", ""),
+                }
+            )
+
+    if update_state:
+        _write_json_state(
+            state_file,
+            {
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "assignments": current,
+            },
+        )
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "state_path": str(state_file),
+        "new_assignments": new_assignments,
+        "changed_deadlines": changed_deadlines,
+        "removed_assignments": removed_assignments,
+    }
+
+
+def _grade_key(grade: CourseGrade) -> str:
+    return f"{grade['courseid']}:{grade['course_name']}"
+
+
+def _grade_snapshot(grades: list[CourseGrade]) -> dict[str, dict]:
+    return {
+        _grade_key(g): {
+            "courseid": g["courseid"],
+            "course_name": g["course_name"],
+            "grade": g.get("grade"),
+            "rank": g.get("rank"),
+        }
+        for g in grades
+    }
+
+
+def detect_grade_changes(
+    state_path: str | None = None, update_state: bool = True
+) -> GradeDiffReport:
+    """Detect newly visible, changed, and removed course grade overviews."""
+    state_file = Path(state_path) if state_path else _default_state_dir() / "grades.json"
+    current_grades = get_grades(None)
+    current = _grade_snapshot(current_grades)  # type: ignore[arg-type]
+    previous = _read_json_state(state_file).get("grades", {})
+
+    new_grades: list[CourseGrade] = []
+    changed_grades: list[GradeChange] = []
+    removed_grades: list[CourseGrade] = []
+
+    for grade in current_grades:  # type: ignore[assignment]
+        key = _grade_key(grade)
+        old = previous.get(key)
+        current_value = grade.get("grade")
+        if old is None:
+            if current_value not in (None, "", "-"):
+                new_grades.append(grade)
+            continue
+        old_value = old.get("grade")
+        if old_value != current_value:
+            changed_grades.append(
+                {
+                    "courseid": grade["courseid"],
+                    "course_name": grade["course_name"],
+                    "old_grade": old_value,
+                    "new_grade": current_value,
+                }
+            )
+
+    for key, old in previous.items():
+        if key not in current:
+            removed_grades.append(
+                {
+                    "courseid": int(old.get("courseid", 0)),
+                    "course_name": old.get("course_name", ""),
+                    "grade": old.get("grade", ""),
+                    "rank": old.get("rank"),
+                }
+            )
+
+    if update_state:
+        _write_json_state(
+            state_file,
+            {"updated_at": datetime.now(timezone.utc).isoformat(), "grades": current},
+        )
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "state_path": str(state_file),
+        "new_grades": new_grades,
+        "changed_grades": changed_grades,
+        "removed_grades": removed_grades,
+    }
+
+
+def _deadline_urgency(seconds_remaining: int) -> str:
+    if seconds_remaining <= 6 * 3600:
+        return "critical"
+    if seconds_remaining <= 24 * 3600:
+        return "today"
+    if seconds_remaining <= 3 * 24 * 3600:
+        return "soon"
+    return "upcoming"
+
+
+def deadline_watchdog(days_ahead: int = 3, now_ts: int | None = None) -> DeadlineWatchdogReport:
+    """Return unsubmitted deadlines within ``days_ahead`` days, sorted by urgency."""
+    now = now_ts if now_ts is not None else int(datetime.now(timezone.utc).timestamp())
+    horizon = now + days_ahead * 24 * 3600
+    alerts: list[DeadlineAlert] = []
+
+    for deadline in get_upcoming_deadlines():
+        due = int(deadline.get("duedate", 0) or 0)
+        if deadline.get("submitted") or due <= 0 or due < now or due > horizon:
+            continue
+        seconds = due - now
+        alerts.append(
+            {
+                "assignment_id": deadline["assignment_id"],
+                "assignment_name": deadline["assignment_name"],
+                "course_name": deadline["course_name"],
+                "duedate": due,
+                "duedate_formatted": deadline["duedate_formatted"],
+                "submitted": deadline["submitted"],
+                "submission_status": deadline.get("submission_status"),
+                "seconds_remaining": seconds,
+                "days_remaining": round(seconds / 86400, 2),
+                "urgency": _deadline_urgency(seconds),
+            }
+        )
+
+    alerts.sort(key=lambda x: (x["duedate"], x["assignment_id"]))
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "days_ahead": days_ahead,
+        "count": len(alerts),
+        "alerts": alerts,
     }
 
 
