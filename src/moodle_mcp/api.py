@@ -2516,3 +2516,307 @@ def create_implementation_plan(assignid: int) -> ImplementationPlan:
 if __name__ == "__main__":
     upcoming_events = get_upcoming_events()
     to_json_file(upcoming_events, "upcoming_events.json")
+
+# ---------------------------------------------------------------------------
+# Phase 2 Obsidian sync tools
+# ---------------------------------------------------------------------------
+
+class ObsidianSyncResult(TypedDict):
+    generated_at: str
+    target_dir: str
+    files_written: list[str]
+    courses_count: int
+    deadlines_count: int
+    grades_count: int
+
+
+def _slug_filename(value: str, fallback: str = "Untitled") -> str:
+    """Return a filesystem-safe Obsidian note filename stem."""
+    text = re.sub(r"<[^>]+>", "", value or "").strip() or fallback
+    text = re.sub(r"[\\/:*?\"<>|]+", "-", text)
+    text = re.sub(r"\s+", " ", text).strip(" .")
+    return text[:120] or fallback
+
+
+def _md_escape_cell(value) -> str:
+    return str(value if value is not None else "").replace("|", "\\|").replace("\n", " ")
+
+
+def _date_from_ts(ts: int | None) -> str:
+    if not ts:
+        return ""
+    return datetime.fromtimestamp(int(ts), tz=timezone.utc).date().isoformat()
+
+
+def _resolve_obsidian_sync_dir(target_dir: str | None = None) -> Path:
+    """Resolve the Moodle Obsidian sync directory.
+
+    Priority:
+    1. explicit target_dir argument
+    2. MOODLE_OBSIDIAN_SYNC_DIR env
+    3. OBSIDIAN_VAULT_PATH env + Academic/Moodle
+    4. ~/Obsidian Vault/Academic/Moodle
+
+    The default intentionally uses Academic/Moodle and never 03 Projects.
+    """
+    if target_dir:
+        return Path(target_dir).expanduser()
+
+    configured = os.getenv("MOODLE_OBSIDIAN_SYNC_DIR")
+    if configured:
+        return Path(configured).expanduser()
+
+    vault = os.getenv("OBSIDIAN_VAULT_PATH")
+    if vault:
+        return Path(vault).expanduser() / "Academic" / "Moodle"
+
+    return Path.home() / "Obsidian Vault" / "Academic" / "Moodle"
+
+
+def _write_markdown(path: Path, content: str) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content.rstrip() + "\n", encoding="utf-8")
+    return str(path)
+
+
+def _frontmatter(**fields) -> str:
+    lines = ["---"]
+    for key, value in fields.items():
+        if value is None:
+            continue
+        text = str(value).replace('"', '\\"')
+        lines.append(f'{key}: "{text}"')
+    lines.append("---")
+    return "\n".join(lines) + "\n\n"
+
+
+def _course_note_name(course: Course) -> str:
+    short = course.get("shortname") or f"course-{course.get('id', 0)}"
+    full = course.get("fullname") or short
+    return _slug_filename(f"{short} - {full}") + ".md"
+
+
+def _render_deadlines_markdown(deadlines: list[UpcomingDeadline]) -> str:
+    lines = [
+        _frontmatter(type="moodle-deadlines", synced_at=datetime.now(timezone.utc).isoformat()).rstrip(),
+        "# Moodle Deadlines",
+        "",
+        "Generated from Moodle MCP.",
+        "",
+    ]
+    if not deadlines:
+        lines.extend(["Tidak ada upcoming deadline.", ""])
+        return "\n".join(lines)
+
+    for item in sorted(deadlines, key=lambda d: d.get("duedate", 0)):
+        checked = "x" if item.get("submitted") else " "
+        due_date = _date_from_ts(item.get("duedate"))
+        due_part = f" 📅 {due_date}" if due_date else ""
+        status = item.get("submission_status") or ("submitted" if item.get("submitted") else "not submitted")
+        lines.append(
+            f"- [{checked}] {item['assignment_name']} ({item['course_name']}){due_part} #moodle/assignment"
+        )
+        lines.append(f"  - Status: {status}")
+        lines.append(f"  - Assignment ID: `{item['assignment_id']}`")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _render_grades_markdown(grades: list[CourseGrade]) -> str:
+    lines = [
+        _frontmatter(type="moodle-grades", synced_at=datetime.now(timezone.utc).isoformat()).rstrip(),
+        "# Moodle Grades",
+        "",
+        "| Course | Grade | Rank |",
+        "|---|---:|---:|",
+    ]
+    for grade in sorted(grades, key=lambda g: g.get("course_name", "")):
+        lines.append(
+            f"| {_md_escape_cell(grade.get('course_name'))} | {_md_escape_cell(grade.get('grade'))} | {_md_escape_cell(grade.get('rank'))} |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _render_dashboard_markdown(
+    courses: list[Course], deadlines: list[UpcomingDeadline], grades: list[CourseGrade]
+) -> str:
+    grade_map = {g["courseid"]: g.get("grade") for g in grades}
+    lines = [
+        _frontmatter(type="moodle-dashboard", synced_at=datetime.now(timezone.utc).isoformat()).rstrip(),
+        "# Moodle Dashboard",
+        "",
+        "## Summary",
+        f"- Courses: {len(courses)}",
+        f"- Upcoming deadlines: {len(deadlines)}",
+        f"- Grades visible: {len([g for g in grades if g.get('grade')])}",
+        "",
+        "## Courses",
+        "",
+        "| Course | Progress | Grade |",
+        "|---|---:|---:|",
+    ]
+    for course in sorted(courses, key=lambda c: c.get("shortname", "")):
+        note_stem = _course_note_name(course)[:-3]
+        short = course.get("shortname") or str(course.get("id"))
+        link = f"[[Courses/{note_stem}|{short}]]"
+        progress = course.get("progress")
+        progress_text = "" if progress is None else f"{progress}%"
+        lines.append(f"| {link} | {_md_escape_cell(progress_text)} | {_md_escape_cell(grade_map.get(course['id'], ''))} |")
+
+    lines.extend(["", "## Upcoming Deadlines", ""])
+    for item in sorted(deadlines, key=lambda d: d.get("duedate", 0))[:15]:
+        due = _date_from_ts(item.get("duedate"))
+        lines.append(f"- {due} - {item['course_name']}: {item['assignment_name']}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _render_course_markdown(
+    course: Course,
+    deadlines: list[UpcomingDeadline],
+    grades: list[CourseGrade],
+    progress_items: list[CourseProgress],
+    sections: list[CourseSection],
+) -> str:
+    course_grade = next((g for g in grades if g.get("courseid") == course["id"]), None)
+    progress = next((p for p in progress_items if p.get("courseid") == course["id"]), None)
+    lines = [
+        _frontmatter(
+            type="moodle-course",
+            courseid=course.get("id"),
+            shortname=course.get("shortname"),
+            synced_at=datetime.now(timezone.utc).isoformat(),
+        ).rstrip(),
+        f"# {course.get('shortname') or course.get('id')} - {course.get('fullname')}",
+        "",
+        "## Overview",
+        f"- Course ID: `{course.get('id')}`",
+        f"- Progress: {course.get('progress') if course.get('progress') is not None else 'N/A'}",
+        f"- Grade: {course_grade.get('grade') if course_grade else 'N/A'}",
+    ]
+    if progress:
+        lines.append(f"- Activities: {progress.get('completed_activities')}/{progress.get('total_activities')}")
+
+    course_deadlines = [d for d in deadlines if d.get("course_name") == course.get("fullname")]
+    lines.extend(["", "## Assignments", ""])
+    if course_deadlines:
+        for item in sorted(course_deadlines, key=lambda d: d.get("duedate", 0)):
+            checked = "x" if item.get("submitted") else " "
+            due = _date_from_ts(item.get("duedate"))
+            lines.append(f"- [{checked}] {item['assignment_name']} 📅 {due}")
+    else:
+        lines.append("Tidak ada upcoming assignment di course ini.")
+
+    lines.extend(["", "## Materials", ""])
+    any_material = False
+    for section in sections:
+        modules = section.get("modules", [])
+        if not modules:
+            continue
+        any_material = True
+        lines.append(f"### {section.get('name') or 'Section ' + str(section.get('section'))}")
+        for module in modules:
+            url = module.get("url")
+            if url:
+                lines.append(f"- [{module.get('name')}]({url}) `{module.get('modname')}`")
+            else:
+                lines.append(f"- {module.get('name')} `{module.get('modname')}`")
+            for content in module.get("contents") or []:
+                if isinstance(content, dict) and content.get("filename"):
+                    fileurl = content.get("fileurl")
+                    if fileurl:
+                        lines.append(f"  - [{content.get('filename')}]({fileurl})")
+                    else:
+                        lines.append(f"  - {content.get('filename')}")
+        lines.append("")
+    if not any_material:
+        lines.append("Belum ada material yang terbaca dari course content.")
+    return "\n".join(lines)
+
+
+def export_deadlines_to_obsidian(target_dir: str | None = None) -> ObsidianSyncResult:
+    """Export Moodle deadlines to Academic/Moodle/Deadlines.md in Obsidian."""
+    target = _resolve_obsidian_sync_dir(target_dir)
+    deadlines = get_upcoming_deadlines()
+    files = [_write_markdown(target / "Deadlines.md", _render_deadlines_markdown(deadlines))]
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "target_dir": str(target),
+        "files_written": files,
+        "courses_count": 0,
+        "deadlines_count": len(deadlines),
+        "grades_count": 0,
+    }
+
+
+def export_course_outline(courseid: int, target_dir: str | None = None) -> ObsidianSyncResult:
+    """Export one Moodle course outline/material list to Obsidian Academic/Moodle."""
+    target = _resolve_obsidian_sync_dir(target_dir)
+    courses = get_my_courses()
+    course = next((c for c in courses if c["id"] == courseid), None)
+    if course is None:
+        raise ValueError(f"Course not found: {courseid}")
+    deadlines = get_upcoming_deadlines()
+    grades = get_grades(None)  # type: ignore[assignment]
+    progress = get_course_progress(courseid)
+    sections = get_course_content(courseid)
+    note = _render_course_markdown(course, deadlines, grades, progress, sections)  # type: ignore[arg-type]
+    files = [_write_markdown(target / "Courses" / _course_note_name(course), note)]
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "target_dir": str(target),
+        "files_written": files,
+        "courses_count": 1,
+        "deadlines_count": len([d for d in deadlines if d.get("course_name") == course.get("fullname")]),
+        "grades_count": len([g for g in grades if g.get("courseid") == courseid]),  # type: ignore[union-attr]
+    }
+
+
+def sync_moodle_to_obsidian(target_dir: str | None = None, include_course_materials: bool = True) -> ObsidianSyncResult:
+    """Sync Moodle dashboard, deadlines, grades, and course notes to Obsidian.
+
+    Default target: ~/Obsidian Vault/Academic/Moodle. Set
+    MOODLE_OBSIDIAN_SYNC_DIR or pass target_dir to override.
+    """
+    target = _resolve_obsidian_sync_dir(target_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "Courses").mkdir(exist_ok=True)
+    (target / "Assignments").mkdir(exist_ok=True)
+    (target / "Deadlines").mkdir(exist_ok=True)
+    (target / "Grades").mkdir(exist_ok=True)
+    (target / "Materials").mkdir(exist_ok=True)
+
+    courses = get_my_courses()
+    deadlines = get_upcoming_deadlines()
+    grades = get_grades(None)  # type: ignore[assignment]
+    progress_items = get_course_progress()
+
+    files: list[str] = []
+    files.append(_write_markdown(target / "Dashboard.md", _render_dashboard_markdown(courses, deadlines, grades)))  # type: ignore[arg-type]
+    files.append(_write_markdown(target / "Deadlines.md", _render_deadlines_markdown(deadlines)))
+    files.append(_write_markdown(target / "Grades.md", _render_grades_markdown(grades)))  # type: ignore[arg-type]
+
+    readme = target / "README.md"
+    if not readme.exists():
+        files.append(_write_markdown(readme, "# Moodle Academic Sync\n\nOutput otomatis Moodle MCP untuk Obsidian.\n"))
+
+    for course in courses:
+        sections: list[CourseSection] = []
+        if include_course_materials:
+            try:
+                sections = get_course_content(course["id"])
+            except Exception as e:
+                logger.warning(f"Could not fetch course content for Obsidian sync course {course['id']}: {e}")
+        note = _render_course_markdown(course, deadlines, grades, progress_items, sections)  # type: ignore[arg-type]
+        files.append(_write_markdown(target / "Courses" / _course_note_name(course), note))
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "target_dir": str(target),
+        "files_written": files,
+        "courses_count": len(courses),
+        "deadlines_count": len(deadlines),
+        "grades_count": len(grades),  # type: ignore[arg-type]
+    }
+

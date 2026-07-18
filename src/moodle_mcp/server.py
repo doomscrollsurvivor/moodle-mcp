@@ -133,6 +133,24 @@ def deadline_watchdog(days_ahead: int = 3) -> api.DeadlineWatchdogReport:
 
 
 @mcp.tool()
+def sync_moodle_to_obsidian(target_dir: str | None = None, include_course_materials: bool = True) -> api.ObsidianSyncResult:
+    """Sync Moodle dashboard, deadlines, grades, and course notes to Obsidian Academic/Moodle."""
+    return api.sync_moodle_to_obsidian(target_dir=target_dir, include_course_materials=include_course_materials)
+
+
+@mcp.tool()
+def export_deadlines_to_obsidian(target_dir: str | None = None) -> api.ObsidianSyncResult:
+    """Export Moodle deadlines to Obsidian Academic/Moodle/Deadlines.md."""
+    return api.export_deadlines_to_obsidian(target_dir=target_dir)
+
+
+@mcp.tool()
+def export_course_outline(courseid: int, target_dir: str | None = None) -> api.ObsidianSyncResult:
+    """Export one Moodle course outline/material list to Obsidian Academic/Moodle/Courses."""
+    return api.export_course_outline(courseid=courseid, target_dir=target_dir)
+
+
+@mcp.tool()
 def ask_moodle(question: str) -> api.MoodleAnswer:
     """Ask a natural language question about your Moodle data. Routes to the right data sources based on your question"""
     return api.ask_moodle(question)
