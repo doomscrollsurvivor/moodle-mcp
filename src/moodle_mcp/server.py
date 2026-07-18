@@ -168,6 +168,68 @@ def download_assignment_attachments(assignid: int, target_dir: str | None = None
     return api.download_assignment_attachments(assignid=assignid, target_dir=target_dir, overwrite=overwrite)
 
 
+# ---------------------------------------------------------------------------
+# Phase 4 — Assignment submission tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def get_submission_status_detail(assignid: int) -> api.SubmissionStatusDetail:
+    """Get detailed submission status for an assignment: state, grading status, submitted files, and edit permissions."""
+    return api.get_submission_status_detail(assignid=assignid)
+
+
+@mcp.tool()
+def submit_assignment_text(assignid: int, text: str, format: int = 1) -> api.SubmissionResult:
+    """Submit an online text answer for a Moodle assignment. format: 1=HTML (default), 0=MOODLE, 2=PLAIN."""
+    return api.submit_assignment_text(assignid=assignid, text=text, format=format)
+
+
+@mcp.tool()
+def get_assignment_feedback(assignid: int) -> api.AssignmentFeedback:
+    """Get the grade and feedback comments left by the grader for an assignment."""
+    return api.get_assignment_feedback(assignid=assignid)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — Calendar & Completion tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def create_calendar_event(
+    name: str,
+    timestart: int,
+    eventtype: str = "user",
+    description: str = "",
+    timeduration: int = 0,
+    courseid: int | None = None,
+) -> api.CalendarEvent:
+    """Create a new personal or course event in the Moodle calendar. timestart is a Unix timestamp."""
+    return api.create_calendar_event(
+        name=name, timestart=timestart, eventtype=eventtype,
+        description=description, timeduration=timeduration, courseid=courseid,
+    )
+
+
+@mcp.tool()
+def get_activity_completion(courseid: int) -> list[api.ActivityCompletionStatus]:
+    """Get completion status (done/not done) for every activity in a course."""
+    return api.get_activity_completion(courseid=courseid)
+
+
+@mcp.tool()
+def mark_activity_complete(cmid: int, completed: bool = True) -> api.CompletionUpdateResult:
+    """Manually mark a course activity as complete or incomplete (only works for manual-completion activities)."""
+    return api.mark_activity_complete(cmid=cmid, completed=completed)
+
+
+@mcp.tool()
+def get_course_updates(courseid: int, since: int | None = None) -> list[api.CourseUpdateInstance]:
+    """Get module-level changes in a course since a timestamp (default: last 24 hours)."""
+    return api.get_course_updates(courseid=courseid, since=since)
+
+
 @mcp.tool()
 def ask_moodle(question: str) -> api.MoodleAnswer:
     """Ask a natural language question about your Moodle data. Routes to the right data sources based on your question"""

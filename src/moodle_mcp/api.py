@@ -3044,3 +3044,360 @@ def _download_report(target: Path, total: int, results: list[DownloadedFile]) ->
         "files": results,
     }
 
+
+# ---------------------------------------------------------------------------
+# Phase 4 — Assignment submission tools
+# ---------------------------------------------------------------------------
+
+
+class SubmissionStatusDetail(TypedDict):
+    assignid: int
+    submission_id: int | None
+    status: str
+    gradingstatus: str
+    graded: bool
+    canedit: bool
+    cansubmit: bool
+    locked: bool
+    timemodified: int | None
+    submitted_files: list[dict]
+
+
+class SubmissionResult(TypedDict):
+    success: bool
+    assignid: int
+    message: str
+
+
+class AssignmentFeedback(TypedDict):
+    assignid: int
+    userid: int | None
+    grade: str | None
+    gradingstatus: str
+    timemodified: int | None
+    feedback_comments: str
+
+
+def get_submission_status_detail(assignid: int) -> SubmissionStatusDetail:
+    """Get detailed submission and grading status for an assignment."""
+    data = get_moodle_api_data(
+        APIFunction.mod_assign_get_submission_status,
+        params={"assignid": assignid},
+    )
+    attempt = data.get("lastattempt", {})
+    submission = attempt.get("submission", {})
+
+    # collect submitted files from file plugin
+    submitted_files: list[dict] = []
+    for plugin in submission.get("plugins", []):
+        if plugin.get("type") == "file":
+            for area in plugin.get("fileareas", []):
+                for f in area.get("files", []):
+                    submitted_files.append({
+                        "filename": f.get("filename", ""),
+                        "fileurl": f.get("fileurl", ""),
+                        "filesize": f.get("filesize", 0),
+                        "mimetype": f.get("mimetype"),
+                        "timemodified": f.get("timemodified"),
+                    })
+
+    return {
+        "assignid": assignid,
+        "submission_id": submission.get("id"),
+        "status": submission.get("status", "new"),
+        "gradingstatus": attempt.get("gradingstatus", "notgraded"),
+        "graded": bool(attempt.get("graded", False)),
+        "canedit": bool(attempt.get("canedit", False)),
+        "cansubmit": bool(attempt.get("cansubmit", False)),
+        "locked": bool(attempt.get("locked", False)),
+        "timemodified": submission.get("timemodified") or None,
+        "submitted_files": submitted_files,
+    }
+
+
+def submit_assignment_text(
+    assignid: int,
+    text: str,
+    format: int = 1,
+) -> SubmissionResult:
+    """Submit an online text answer for a Moodle assignment.
+
+    Parameters
+    ----------
+    assignid:
+        The assignment ID.
+    text:
+        HTML or plain text content to submit.
+    format:
+        Moodle text format — 1=HTML (default), 0=MOODLE, 2=PLAIN.
+    """
+    extra_params = {
+        "assignmentid": assignid,
+        "plugindata[onlinetext_editor][text]": text,
+        "plugindata[onlinetext_editor][format]": format,
+        "plugindata[onlinetext_editor][itemid]": 0,
+    }
+    data = get_moodle_api_data(
+        APIFunction.mod_assign_save_submission,
+        params=extra_params,
+    )
+    warnings = data.get("warnings", []) if isinstance(data, dict) else []
+    return {
+        "success": True,
+        "assignid": assignid,
+        "message": warnings[0].get("message", "Submitted successfully.") if warnings else "Submitted successfully.",
+    }
+
+
+def get_assignment_feedback(assignid: int) -> AssignmentFeedback:
+    """Get grade and feedback comments for an assignment.
+
+    Uses the submission status (which a student can always read) to extract
+    grading status, then enriches with grade value from the grade report if
+    the assignment has been graded.
+    """
+    # Step 1: submission status gives us gradingstatus + feedback plugin
+    status_data = get_moodle_api_data(
+        APIFunction.mod_assign_get_submission_status,
+        params={"assignid": assignid},
+    )
+    attempt = status_data.get("lastattempt", {})
+    submission = attempt.get("submission", {})
+    gradingstatus = attempt.get("gradingstatus", "notgraded")
+    graded = bool(attempt.get("graded", False))
+
+    # Extract inline feedback text from submission plugins (comments plugin)
+    feedback_text = ""
+    for plugin in submission.get("plugins", []):
+        if plugin.get("type") == "comments":
+            for field in plugin.get("editorfields", []):
+                feedback_text = field.get("text", "")
+                if feedback_text:
+                    break
+
+    # Step 2: get grade value from gradereport (student-accessible)
+    grade_str: str | None = None
+    userid: int | None = None
+    timemodified: int | None = submission.get("timemodified") or None
+
+    if graded:
+        try:
+            # Find which course this assignment belongs to
+            assignments_data = get_moodle_api_data(APIFunction.mod_assign_get_assignments)
+            courseid: int | None = None
+            for course in assignments_data.get("courses", []):
+                for asgmt in course.get("assignments", []):
+                    if int(asgmt.get("id", 0)) == int(assignid):
+                        courseid = course.get("id")
+                        break
+                if courseid:
+                    break
+
+            if courseid:
+                site_info = get_moodle_api_data(APIFunction.core_webservice_get_site_info)
+                userid = site_info.get("userid")
+                report = get_moodle_api_data(
+                    APIFunction.gradereport_user_get_grade_items,
+                    params={"courseid": courseid, "userid": userid},
+                )
+                for ug in report.get("usergrades", []):
+                    for item in ug.get("gradeitems", []) or []:
+                        if item.get("itemmodule") == "assign" and int(item.get("cmid", 0) or 0) > 0:
+                            # match by assignment instance id embedded in iteminstance
+                            if int(item.get("iteminstance", 0) or 0) == int(assignid):
+                                raw_grade = item.get("graderaw")
+                                if raw_grade is not None:
+                                    grade_str = str(raw_grade)
+                                feedback_text = feedback_text or item.get("feedback", "") or ""
+                                break
+        except Exception:
+            pass  # grade enrichment is best-effort
+
+    return {
+        "assignid": assignid,
+        "userid": userid,
+        "grade": grade_str,
+        "gradingstatus": gradingstatus,
+        "timemodified": timemodified,
+        "feedback_comments": feedback_text,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — Calendar & Completion tools
+# ---------------------------------------------------------------------------
+
+
+class CalendarEvent(TypedDict):
+    id: int
+    name: str
+    timestart: int
+    timeduration: int
+    eventtype: str
+    description: str
+
+
+class ActivityCompletionStatus(TypedDict):
+    cmid: int
+    modname: str
+    instance: int
+    tracking: int
+    completed: bool
+    timecompleted: int | None
+
+
+class CompletionUpdateResult(TypedDict):
+    success: bool
+    cmid: int
+    completed: bool
+
+
+class CourseUpdateInstance(TypedDict):
+    contextlevel: str
+    id: int
+    updates: list[dict]
+
+
+def create_calendar_event(
+    name: str,
+    timestart: int,
+    eventtype: str = "user",
+    description: str = "",
+    timeduration: int = 0,
+    courseid: int | None = None,
+) -> CalendarEvent:
+    """Create a new event in the Moodle calendar.
+
+    Parameters
+    ----------
+    name:
+        Event title.
+    timestart:
+        Unix timestamp for event start time.
+    eventtype:
+        ``"user"`` (personal), ``"course"`` (requires courseid), or ``"site"``.
+    description:
+        Optional event description (HTML).
+    timeduration:
+        Duration in seconds (0 = point-in-time event).
+    courseid:
+        Required when eventtype is ``"course"``.
+    """
+    event_params: dict = {
+        "events[0][name]": name,
+        "events[0][timestart]": timestart,
+        "events[0][eventtype]": eventtype,
+        "events[0][description]": description,
+        "events[0][timeduration]": timeduration,
+    }
+    if courseid is not None:
+        event_params["events[0][courseid]"] = courseid
+
+    data = get_moodle_api_data(
+        APIFunction.core_calendar_create_calendar_events,
+        params=event_params,
+    )
+    events = data.get("events", []) if isinstance(data, dict) else []
+    if not events:
+        raise MoodleAPIError("no_event_returned", "Calendar event was not created", "create_calendar_event")
+    ev = events[0]
+    return {
+        "id": ev.get("id", 0),
+        "name": ev.get("name", name),
+        "timestart": ev.get("timestart", timestart),
+        "timeduration": ev.get("timeduration", timeduration),
+        "eventtype": ev.get("eventtype", eventtype),
+        "description": ev.get("description", description),
+    }
+
+
+def get_activity_completion(courseid: int) -> list[ActivityCompletionStatus]:
+    """Get completion status for every activity in a course."""
+    site_info = get_moodle_api_data(APIFunction.core_webservice_get_site_info)
+    userid = site_info.get("userid", 0)
+
+    data = get_moodle_api_data(
+        APIFunction.core_completion_get_activities_completion_status,
+        params={"courseid": courseid, "userid": userid},
+    )
+    statuses = data.get("statuses", []) if isinstance(data, dict) else []
+    return [
+        {
+            "cmid": s.get("cmid", 0),
+            "modname": s.get("modname", ""),
+            "instance": s.get("instance", 0),
+            "tracking": s.get("tracking", 0),
+            "completed": s.get("state", 0) == 1,
+            "timecompleted": s.get("timecompleted") or None,
+        }
+        for s in statuses
+    ]
+
+
+def mark_activity_complete(cmid: int, completed: bool = True) -> CompletionUpdateResult:
+    """Manually mark a course activity as complete or incomplete.
+
+    Only works for activities that allow manual completion tracking.
+    """
+    data = get_moodle_api_data(
+        APIFunction.core_completion_update_activity_completion_status_manually,
+        params={"cmid": cmid, "completed": 1 if completed else 0},
+    )
+    return {
+        "success": bool(data.get("status", True)) if isinstance(data, dict) else True,
+        "cmid": cmid,
+        "completed": completed,
+    }
+
+
+def get_course_updates(courseid: int, since: int | None = None) -> list[CourseUpdateInstance]:
+    """Get module-level updates in a course since a given timestamp.
+
+    Checks all modules in the course and returns those that changed since
+    the given Unix timestamp (default: 24 hours ago).
+
+    Parameters
+    ----------
+    courseid:
+        The course to check.
+    since:
+        Unix timestamp. Defaults to 24 hours ago.
+    """
+    import time as _time
+    if since is None:
+        since = int(_time.time()) - 86400
+
+    # Get all module ids first (core_course_check_updates needs module-level context)
+    sections = get_course_content(courseid)
+    cmids: list[int] = []
+    for section in sections:
+        for mod in section.get("modules", []):
+            mid = mod.get("id")
+            if mid:
+                cmids.append(int(mid))
+
+    if not cmids:
+        return []
+
+    # Build tocheck params (max 50 modules per call to avoid URL length issues)
+    extra_params: dict = {"courseid": courseid}
+    for i, cmid in enumerate(cmids[:50]):
+        extra_params[f"tocheck[{i}][contextlevel]"] = "module"
+        extra_params[f"tocheck[{i}][id]"] = cmid
+        extra_params[f"tocheck[{i}][since]"] = since
+
+    data = get_moodle_api_data(
+        APIFunction.core_course_check_updates,
+        params=extra_params,
+    )
+    instances = data.get("instances", []) if isinstance(data, dict) else []
+    return [
+        {
+            "contextlevel": inst.get("contextlevel", ""),
+            "id": inst.get("id", 0),
+            "updates": inst.get("updates", []),
+        }
+        for inst in instances
+        if inst.get("updates")  # only emit instances that actually changed
+    ]
+

@@ -40,6 +40,18 @@ class APIFunction(Enum):
         "core_completion_get_course_completion_status"
     )
     core_calendar_get_calendar_events = "core_calendar_get_calendar_events"
+    # Phase 4 — submission
+    mod_assign_save_submission = "mod_assign_save_submission"
+    mod_assign_get_grades = "mod_assign_get_grades"
+    # Phase 6 — calendar & completion
+    core_calendar_create_calendar_events = "core_calendar_create_calendar_events"
+    core_completion_get_activities_completion_status = (
+        "core_completion_get_activities_completion_status"
+    )
+    core_completion_update_activity_completion_status_manually = (
+        "core_completion_update_activity_completion_status_manually"
+    )
+    core_course_check_updates = "core_course_check_updates"
 
 
 # Fields not needed for specific API functions
