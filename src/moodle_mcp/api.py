@@ -1,6 +1,10 @@
 import json
 import os
 import re
+import shutil
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+import requests
 from pathlib import Path
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -2818,5 +2822,225 @@ def sync_moodle_to_obsidian(target_dir: str | None = None, include_course_materi
         "courses_count": len(courses),
         "deadlines_count": len(deadlines),
         "grades_count": len(grades),  # type: ignore[arg-type]
+    }
+
+# ---------------------------------------------------------------------------
+# Phase 3 material and assignment attachment download tools
+# ---------------------------------------------------------------------------
+
+class DownloadableFile(TypedDict):
+    courseid: int
+    section_name: str
+    module_id: int
+    module_name: str
+    module_type: str
+    filename: str
+    fileurl: str
+    filesize: int | None
+    mimetype: str | None
+
+
+class DownloadedFile(TypedDict):
+    filename: str
+    path: str
+    status: str
+    bytes: int
+    source_url: str
+    mimetype: str | None
+
+
+class DownloadReport(TypedDict):
+    generated_at: str
+    target_dir: str
+    total_files: int
+    downloaded_count: int
+    skipped_count: int
+    failed_count: int
+    files: list[DownloadedFile]
+
+
+def _default_download_dir() -> Path:
+    return Path(os.getenv("MOODLE_DOWNLOAD_DIR", str(Path.home() / "Obsidian Vault" / "Academic" / "Moodle" / "Materials"))).expanduser()
+
+
+def _safe_filename(name: str, fallback: str = "download") -> str:
+    text = (name or fallback).split("/")[-1].split("\\")[-1].strip() or fallback
+    text = re.sub(r"[\\/:*?\"<>|]+", "-", text)
+    text = re.sub(r"\s+", " ", text).strip(" .")
+    return text[:160] or fallback
+
+
+def _redact_url_token(url: str) -> str:
+    parts = urlsplit(url)
+    query = [(k, "[REDACTED]" if k.lower() in {"token", "wstoken"} else v) for k, v in parse_qsl(parts.query, keep_blank_values=True)]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
+def _append_moodle_token(url: str, token: str | None = None) -> str:
+    """Append Moodle auth token to a URL.
+
+    Moodle pluginfile.php endpoints require ``token=`` (not ``wstoken=``).
+    The webservice REST endpoint uses ``wstoken=``.  We always use ``token=``
+    here because _download_file only handles pluginfile URLs.
+    """
+    token = token if token is not None else os.getenv("MOODLE_TOKEN", "")
+    if not token:
+        return url
+    parts = urlsplit(url)
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    lower_keys = {k.lower() for k, _ in query}
+    if "token" not in lower_keys and "wstoken" not in lower_keys:
+        query.append(("token", token))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
+def _download_file(url: str, target_dir: Path, filename: str, token: str | None = None, overwrite: bool = False) -> DownloadedFile:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = _safe_filename(filename)
+    destination = target_dir / safe_name
+    if destination.exists() and not overwrite:
+        return {
+            "filename": safe_name,
+            "path": str(destination),
+            "status": "skipped_exists",
+            "bytes": destination.stat().st_size,
+            "source_url": _redact_url_token(_append_moodle_token(url, token)),
+            "mimetype": None,
+        }
+
+    request_url = _append_moodle_token(url, token)
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        )
+    }
+    try:
+        response = requests.get(request_url, headers=headers, timeout=60)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        return {
+            "filename": safe_name,
+            "path": str(destination),
+            "status": f"failed: {e}",
+            "bytes": 0,
+            "source_url": _redact_url_token(request_url),
+            "mimetype": None,
+        }
+
+    tmp = destination.with_suffix(destination.suffix + ".tmp")
+    tmp.write_bytes(response.content)
+    tmp.replace(destination)
+    return {
+        "filename": safe_name,
+        "path": str(destination),
+        "status": "downloaded",
+        "bytes": len(response.content),
+        "source_url": _redact_url_token(request_url),
+        "mimetype": response.headers.get("content-type"),
+    }
+
+
+def list_course_material_files(courseid: int) -> list[DownloadableFile]:
+    """List downloadable files exposed by a course's content modules."""
+    files: list[DownloadableFile] = []
+    for section in get_course_content(courseid):
+        section_name = section.get("name") or f"Section {section.get('section', '')}".strip()
+        for module in section.get("modules", []):
+            for content in module.get("contents") or []:
+                if not isinstance(content, dict):
+                    continue
+                filename = content.get("filename") or ""
+                fileurl = content.get("fileurl") or ""
+                if not filename or filename == "." or not fileurl:
+                    continue
+                files.append(
+                    {
+                        "courseid": courseid,
+                        "section_name": section_name,
+                        "module_id": int(module.get("id", 0) or 0),
+                        "module_name": module.get("name") or "",
+                        "module_type": module.get("modname") or "",
+                        "filename": filename,
+                        "fileurl": fileurl,
+                        "filesize": content.get("filesize"),
+                        "mimetype": content.get("mimetype"),
+                    }
+                )
+    return files
+
+
+def _course_download_folder(courseid: int, target_dir: str | None = None) -> Path:
+    root = Path(target_dir).expanduser() if target_dir else _default_download_dir()
+    course_name = f"Course {courseid}"
+    try:
+        course = next((c for c in get_my_courses() if c["id"] == courseid), None)
+        if course:
+            course_name = _slug_filename(f"{course.get('shortname') or courseid} - {course.get('fullname') or ''}")
+    except Exception:
+        pass
+    return root / course_name
+
+
+def download_course_materials(courseid: int, target_dir: str | None = None, overwrite: bool = False) -> DownloadReport:
+    """Download all file materials from a Moodle course into Academic/Moodle/Materials."""
+    files = list_course_material_files(courseid)
+    course_dir = _course_download_folder(courseid, target_dir)
+    results: list[DownloadedFile] = []
+    for item in files:
+        section_dir = course_dir / _safe_filename(item.get("section_name") or "Section")
+        results.append(_download_file(item["fileurl"], section_dir, item["filename"], overwrite=overwrite))
+    return _download_report(course_dir, len(files), results)
+
+
+def _get_assignment_raw(assignid: int) -> list[dict]:
+    """Return raw assignment dictionaries from mod_assign_get_assignments."""
+    data = get_moodle_api_data(APIFunction.mod_assign_get_assignments)
+    raw: list[dict] = []
+    for course in data.get("courses", []):
+        for assignment in course.get("assignments", []):
+            if int(assignment.get("id", 0) or 0) == int(assignid):
+                item = dict(assignment)
+                item.setdefault("courseid", course.get("id", 0))
+                item.setdefault("coursename", course.get("fullname", ""))
+                raw.append(item)
+    return raw
+
+
+def _assignment_attachment_folder(assignid: int, assignment_name: str, target_dir: str | None = None) -> Path:
+    root = Path(target_dir).expanduser() if target_dir else _default_download_dir() / "Assignments"
+    return root / _slug_filename(f"Assignment {assignid} - {assignment_name}")
+
+
+def download_assignment_attachments(assignid: int, target_dir: str | None = None, overwrite: bool = False) -> DownloadReport:
+    """Download intro attachments for a Moodle assignment."""
+    assignments = _get_assignment_raw(assignid)
+    if not assignments:
+        raise MoodleAPIError("not_found", f"Assignment {assignid} not found", "download_assignment_attachments")
+    assignment = assignments[0]
+    attachments = assignment.get("introattachments") or []
+    target = _assignment_attachment_folder(assignid, assignment.get("name", "Assignment"), target_dir)
+    results: list[DownloadedFile] = []
+    for attachment in attachments:
+        filename = attachment.get("filename") or f"attachment-{len(results)+1}"
+        fileurl = attachment.get("fileurl") or ""
+        if not fileurl:
+            continue
+        results.append(_download_file(fileurl, target, filename, overwrite=overwrite))
+    return _download_report(target, len(attachments), results)
+
+
+def _download_report(target: Path, total: int, results: list[DownloadedFile]) -> DownloadReport:
+    downloaded = len([r for r in results if r["status"] == "downloaded"])
+    skipped = len([r for r in results if r["status"].startswith("skipped")])
+    failed = len([r for r in results if r["status"].startswith("failed")])
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "target_dir": str(target),
+        "total_files": total,
+        "downloaded_count": downloaded,
+        "skipped_count": skipped,
+        "failed_count": failed,
+        "files": results,
     }
 

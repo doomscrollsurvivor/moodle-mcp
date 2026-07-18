@@ -151,6 +151,24 @@ def export_course_outline(courseid: int, target_dir: str | None = None) -> api.O
 
 
 @mcp.tool()
+def list_course_material_files(courseid: int) -> list[api.DownloadableFile]:
+    """List downloadable files exposed by a course's content modules."""
+    return api.list_course_material_files(courseid)
+
+
+@mcp.tool()
+def download_course_materials(courseid: int, target_dir: str | None = None, overwrite: bool = False) -> api.DownloadReport:
+    """Download all file materials from a Moodle course into Academic/Moodle/Materials."""
+    return api.download_course_materials(courseid=courseid, target_dir=target_dir, overwrite=overwrite)
+
+
+@mcp.tool()
+def download_assignment_attachments(assignid: int, target_dir: str | None = None, overwrite: bool = False) -> api.DownloadReport:
+    """Download intro attachments for a Moodle assignment into Academic/Moodle/Materials/Assignments."""
+    return api.download_assignment_attachments(assignid=assignid, target_dir=target_dir, overwrite=overwrite)
+
+
+@mcp.tool()
 def ask_moodle(question: str) -> api.MoodleAnswer:
     """Ask a natural language question about your Moodle data. Routes to the right data sources based on your question"""
     return api.ask_moodle(question)
