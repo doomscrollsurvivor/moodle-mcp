@@ -403,6 +403,79 @@ def _get_user_id() -> int:
 
 
 # ---------------------------------------------------------------------------
+# Class-slot classifier (Polibatam multi-class assignment filtering)
+# ---------------------------------------------------------------------------
+
+# Default class from env — e.g. "Pagi C", "Malam A"
+# Set MOODLE_MY_CLASS in .env to override
+_MY_CLASS: str | None = os.environ.get("MOODLE_MY_CLASS", "Pagi C").strip() or None
+
+# Regex covers all dosen naming variations found in Polibatam LMS:
+#   "Kelas Pagi C", "Kelas C Pagi", "Pagi C", "(Pagi C)",
+#   "Kelas A Pagi", "Kelas A Malam", "Malam B", "Kelas C"
+_SLOT_PATTERN = re.compile(
+    r"(?:"
+    r"(?:kelas\s+)?(?P<w1>pagi|malam)\s+(?P<h1>[abc])"       # "Pagi C", "Malam A"
+    r"|(?:kelas\s+)(?P<h2>[abc])(?:\s+(?P<w2>pagi|malam))?"  # "Kelas C", "Kelas A Pagi"
+    r"|kelas\s+(?P<w3>pagi|malam)\s+(?P<h3>[abc])"           # "Kelas Pagi C"
+    r"|(?P<h4>[abc])\s+(?P<w4>pagi|malam)"                   # "A Pagi", "C Malam"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def extract_class_slot(name: str) -> str | None:
+    """Extract normalized class slot from an assignment name.
+
+    Returns a string like ``'Pagi C'``, ``'Malam A'`` etc., or ``None`` if
+    the assignment name contains no class-slot marker (meaning it is open to
+    all classes).
+
+    Examples
+    --------
+    >>> extract_class_slot("AAS Kelas Pagi C")
+    'Pagi C'
+    >>> extract_class_slot("Praktikum Kelas A Pagi")
+    'Pagi A'
+    >>> extract_class_slot("Laporan Gauss Seidel")
+    None
+    """
+    m = _SLOT_PATTERN.search(name)
+    if not m:
+        return None
+    waktu = (
+        m.group("w1") or m.group("w2") or m.group("w3") or m.group("w4") or "Pagi"
+    )
+    huruf = m.group("h1") or m.group("h2") or m.group("h3") or m.group("h4") or ""
+    if not huruf:
+        return None
+    return f"{waktu.capitalize()} {huruf.upper()}"
+
+
+def is_my_assignment(name: str, my_class: str | None = None) -> bool:
+    """Return True if an assignment belongs to this student's class (or has no class tag).
+
+    Logic:
+    - If the name has **no** class-slot marker → visible to all → return True
+    - If the name has a class-slot marker AND it matches ``my_class`` → return True
+    - Otherwise → belongs to another class → return False
+
+    Parameters
+    ----------
+    name:
+        Assignment name string from Moodle.
+    my_class:
+        Slot string like ``'Pagi C'``. Defaults to ``MOODLE_MY_CLASS`` env var
+        (falls back to ``'Pagi C'``).
+    """
+    target = (my_class or _MY_CLASS or "Pagi C").strip()
+    slot = extract_class_slot(name)
+    if slot is None:
+        return True  # no class tag → open to all
+    return slot.lower() == target.lower()
+
+
+# ---------------------------------------------------------------------------
 # Tool: get_upcoming_events (existing)
 # ---------------------------------------------------------------------------
 
@@ -507,7 +580,25 @@ def get_course_content(courseid: int) -> list[CourseSection]:
 # ---------------------------------------------------------------------------
 
 
-def get_assignments(courseids: list[int] | None = None) -> list[Assignment]:
+def get_assignments(
+    courseids: list[int] | None = None,
+    my_class: str | None = None,
+    filter_by_class: bool = True,
+) -> list[Assignment]:
+    """Fetch all assignments the current user can see.
+
+    Parameters
+    ----------
+    courseids:
+        Optional list of course IDs to restrict the fetch.
+    my_class:
+        Class-slot string like ``'Pagi C'`` used to filter out assignments
+        that belong to other classes. Defaults to ``MOODLE_MY_CLASS`` env var
+        (``'Pagi C'`` if unset).
+    filter_by_class:
+        When True (default), assignments tagged for a different class are
+        silently dropped. Set False to get the raw unfiltered list.
+    """
     params = None
     if courseids:
         params = format_moodle_array_params("courseids", courseids)
@@ -519,18 +610,22 @@ def get_assignments(courseids: list[int] | None = None) -> list[Assignment]:
 
     to_json_file(data, "assignments.json")
 
-    # The response is {"courses": [{"id": ..., "fullname": ..., "assignments": [...]}]}
     courses_data = data.get("courses", [])
 
     result: list[Assignment] = []
+    skipped = 0
     for course in courses_data:
         course_id = course.get("id", 0)
         course_name = course.get("fullname", "")
         for assign in course.get("assignments", []):
+            name = assign.get("name", "")
+            if filter_by_class and not is_my_assignment(name, my_class):
+                skipped += 1
+                continue
             result.append(
                 {
                     "id": assign.get("id", 0),
-                    "name": assign.get("name", ""),
+                    "name": name,
                     "duedate": assign.get("duedate", 0),
                     "cutoffdate": assign.get("cutoffdate", 0),
                     "intro": assign.get("intro", None),
@@ -539,6 +634,11 @@ def get_assignments(courseids: list[int] | None = None) -> list[Assignment]:
                 }
             )
 
+    if skipped:
+        logger.info(
+            f"Filtered out {skipped} assignments belonging to other classes "
+            f"(my_class={my_class or _MY_CLASS!r})"
+        )
     logger.info(f"Extracted {len(result)} assignments across {len(courses_data)} courses")
     return result
 

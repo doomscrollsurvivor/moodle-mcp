@@ -25,9 +25,24 @@ def get_course_content(courseid: int) -> list[api.CourseSection]:
 
 
 @mcp.tool()
-def get_assignments(courseids: list[int] | None = None) -> list[api.Assignment]:
-    """Get assignments for courses. Optionally filter by course IDs. Returns all enrolled courses' assignments if no course IDs are provided."""
-    return api.get_assignments(courseids)
+def get_assignments(
+    courseids: list[int] | None = None,
+    my_class: str | None = None,
+    filter_by_class: bool = True,
+) -> list[api.Assignment]:
+    """Get assignments for courses, automatically filtered to the student's class.
+
+    By default only returns assignments that belong to this student's class slot
+    (e.g. 'Pagi C') or have no class tag. Assignments for 'Pagi A', 'Malam B', etc.
+    are hidden unless ``filter_by_class=False``.
+
+    Parameters
+    ----------
+    courseids: optional list of course IDs to restrict the query.
+    my_class: override the class slot (e.g. 'Pagi C'). Default: MOODLE_MY_CLASS env.
+    filter_by_class: set False to see all assignments including other classes.
+    """
+    return api.get_assignments(courseids, my_class=my_class, filter_by_class=filter_by_class)
 
 
 @mcp.tool()
