@@ -2654,6 +2654,7 @@ class ObsidianSyncResult(TypedDict):
     courses_count: int
     deadlines_count: int
     grades_count: int
+    semester_archived: str | None  # path to archive dir if semester changed, else None
 
 
 def _slug_filename(value: str, fallback: str = "Untitled") -> str:
@@ -2697,6 +2698,113 @@ def _resolve_obsidian_sync_dir(target_dir: str | None = None) -> Path:
         return Path(vault).expanduser() / "Academic" / "Moodle"
 
     return Path.home() / "Obsidian Vault" / "Academic" / "Moodle"
+
+
+# ---------------------------------------------------------------------------
+# Semester change detection + auto-archive
+# ---------------------------------------------------------------------------
+
+_SEMESTER_STATE_FILE = ".semester_courses.json"
+
+
+def _load_known_course_ids(target: Path) -> set[int]:
+    """Load previously synced course IDs from the state file in target dir."""
+    state_file = target / _SEMESTER_STATE_FILE
+    if not state_file.exists():
+        return set()
+    try:
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+        return set(data.get("course_ids", []))
+    except Exception:
+        return set()
+
+
+def _save_known_course_ids(target: Path, course_ids: set[int]) -> None:
+    """Persist current course IDs to the state file."""
+    state_file = target / _SEMESTER_STATE_FILE
+    state_file.write_text(
+        json.dumps({"course_ids": sorted(course_ids), "updated_at": datetime.now(timezone.utc).isoformat()}, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _detect_and_archive_semester(target: Path, current_courses: list) -> str | None:
+    """Compare current Moodle courses against last known state.
+
+    If the course set has changed significantly (semester rollover), archive
+    the existing Moodle sync folder to Academic/Archive/Semester-<label>/
+    before the new sync overwrites it.
+
+    Returns the archive path string if archiving happened, else None.
+    """
+    current_ids: set[int] = {int(c["id"]) for c in current_courses if c.get("id")}
+    known_ids = _load_known_course_ids(target)
+
+    if not known_ids:
+        # First ever sync — just persist and continue.
+        _save_known_course_ids(target, current_ids)
+        logger.info("Moodle semester state initialized with %d courses.", len(current_ids))
+        return None
+
+    # A semester rollover is detected when there is NO overlap between old and
+    # new course sets (completely new courses) OR when more than half the
+    # courses changed (partial semester/re-enrollment).
+    overlap = known_ids & current_ids
+    removed = known_ids - current_ids
+    added = current_ids - known_ids
+
+    semester_changed = (len(overlap) == 0) or (len(removed) > len(known_ids) // 2)
+
+    if not semester_changed:
+        # Normal sync — just update state.
+        _save_known_course_ids(target, current_ids)
+        return None
+
+    # --- Semester rollover detected ---
+    logger.warning(
+        "Semester change detected! Removed courses: %s  Added: %s  Archiving current sync...",
+        removed, added,
+    )
+
+    # Determine archive label from the current Dashboard.md synced_at or today.
+    today = datetime.now(timezone.utc)
+    archive_label = today.strftime("%Y-%m")  # e.g. "2026-07"
+
+    # Archive sits in Academic/Archive/Semester-<label>/
+    vault_academic = target.parent  # Academic/
+    archive_dir = vault_academic / "Archive" / f"Semester-{archive_label}"
+    archive_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    if archive_dir.exists():
+        # Avoid clobbering an existing archive — append a counter.
+        i = 2
+        while True:
+            candidate = vault_academic / "Archive" / f"Semester-{archive_label}-v{i}"
+            if not candidate.exists():
+                archive_dir = candidate
+                break
+            i += 1
+
+    shutil.copytree(str(target), str(archive_dir))
+    logger.info("Semester archived to %s", archive_dir)
+
+    # Create a README in the archive so it's self-documenting inside Obsidian.
+    readme_content = (
+        f"# Archive Semester {archive_label}\n\n"
+        f"Otomatis diarsipkan pada {today.strftime('%Y-%m-%d %H:%M UTC')} "
+        f"saat sistem mendeteksi pergantian semester.\n\n"
+        f"## Perubahan yang Terdeteksi\n\n"
+        f"- Course ID lama: `{sorted(known_ids)}`\n"
+        f"- Course ID baru: `{sorted(current_ids)}`\n"
+        f"- Course dihapus: `{sorted(removed)}`\n"
+        f"- Course ditambah: `{sorted(added)}`\n"
+    )
+    (archive_dir / "Archive-README.md").write_text(readme_content, encoding="utf-8")
+
+    # Update state with new course IDs.
+    _save_known_course_ids(target, current_ids)
+
+    return str(archive_dir)
 
 
 def _write_markdown(path: Path, content: str) -> str:
@@ -2918,6 +3026,9 @@ def sync_moodle_to_obsidian(target_dir: str | None = None, include_course_materi
     grades = get_grades(None)  # type: ignore[assignment]
     progress_items = get_course_progress()
 
+    # --- Semester change detection & auto-archive (runs before overwriting) ---
+    semester_archived = _detect_and_archive_semester(target, courses)
+
     files: list[str] = []
     files.append(_write_markdown(target / "Dashboard.md", _render_dashboard_markdown(courses, deadlines, grades)))  # type: ignore[arg-type]
     files.append(_write_markdown(target / "Deadlines.md", _render_deadlines_markdown(deadlines)))
@@ -2944,6 +3055,7 @@ def sync_moodle_to_obsidian(target_dir: str | None = None, include_course_materi
         "courses_count": len(courses),
         "deadlines_count": len(deadlines),
         "grades_count": len(grades),  # type: ignore[arg-type]
+        "semester_archived": semester_archived,
     }
 
 # ---------------------------------------------------------------------------
