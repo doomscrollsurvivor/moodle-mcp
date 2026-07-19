@@ -379,6 +379,30 @@ Full Moodle Web Service API: [Moodle Dev Docs](https://docs.moodle.org/dev/Web_s
 
 ---
 
+## 🙏 Acknowledgements
+
+This project is a fork of [loyaniu/moodle-mcp](https://github.com/loyaniu/moodle-mcp) with extended features. Full credit to all original contributors:
+
+| Contributor | Role |
+|---|---|
+| [Zhonglin Niu](https://github.com/loyaniu) (loyaniu) | Original author — created the project, Moodle REST API integration, core MCP server |
+| [Vitalii Liudvynskyi](https://github.com/v-liudwinski) | Comprehensive Moodle student dashboard tools (semester overview, study load, health checks) |
+| [Daniel Sticker](https://github.com/stickerdaniel) | Bug fixes for course content paths and search; README improvements |
+| [Lawrence Sinclair](https://github.com/lwsinclair) | MseeP.ai security assessment badge |
+
+### Additions in this fork
+
+- **Phase 2** — Obsidian sync (`sync_moodle_to_obsidian`, `export_deadlines_to_obsidian`, `export_course_outline`)
+- **Phase 3** — Material downloads (`list_course_material_files`, `download_course_materials`, `download_assignment_attachments`)
+- **Phase 4** — Assignment submission and feedback tools
+- **Phase 6** — Calendar events and activity completion tracking
+- **Polibatam class-slot filter** — regex-based multi-class assignment filtering (`MOODLE_MY_CLASS`)
+- **Concurrent fetch** — 10× speedup for actionable tasks via ThreadPoolExecutor
+- **Semester auto-archive** — detects course rollover and archives the previous semester's Obsidian notes automatically
+- **Universal install script** — one-command setup for Hermes, Claude Code, and OpenCode
+
+---
+
 ## 📄 License
 
 MIT
